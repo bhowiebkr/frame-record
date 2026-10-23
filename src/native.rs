@@ -30,6 +30,8 @@ pub struct NativeFrame {
 }
 
 impl NativeFrame {
+    /// # Safety
+    /// `hwnd` must be the live top-level window that owns this frame; it is subclassed until drop.
     pub unsafe fn new(hwnd: HWND, scale: f32) -> Self {
         let state = Box::new(State {
             scale: Cell::new(scale),

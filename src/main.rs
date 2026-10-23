@@ -1,6 +1,5 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
-mod native;
-mod recorder;
+use frame_record::{native, recorder};
 mod source;
 
 use eframe::egui::{
