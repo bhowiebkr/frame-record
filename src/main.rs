@@ -33,6 +33,7 @@ struct FrameRecord {
     native: native::NativeFrame,
     app_icon: egui::TextureHandle,
     name: String,
+    auto_name: String,
     codec: Codec,
     encoding: EncodingOptions,
     microphone: Option<String>,
@@ -104,10 +105,12 @@ impl FrameRecord {
         let native =
             unsafe { native::NativeFrame::new(handle.hwnd.get() as _, ctx.pixels_per_point()) };
         let (codec, microphone, encoding) = recorder::load_preferences();
+        let name = native::default_name();
         let mut app = Self {
             native,
             app_icon,
-            name: native::default_name(),
+            name: name.clone(),
+            auto_name: name,
             codec,
             encoding,
             microphone,
@@ -158,6 +161,11 @@ impl FrameRecord {
             if !self.devices.iter().any(|device| &device.id == mic) {
                 return Err("The selected microphone is disconnected. Choose another microphone in Settings, or select Off.".into());
             }
+        }
+        if self.name == self.auto_name {
+            // An untouched default name follows the time each recording starts.
+            self.auto_name = native::default_name();
+            self.name = self.auto_name.clone();
         }
         let output = self.videos.join(recorder::filename(&self.name)?);
         self.recording = Some(Recording::start(
@@ -466,7 +474,8 @@ impl FrameRecord {
                                 "Source ZIP saved".into()
                             } else {
                                 format!(
-                                    "Embedded source ZIP · {} KB",
+                                    "Version {} · Embedded source ZIP · {} KB",
+                                    env!("CARGO_PKG_VERSION"),
                                     source::ARCHIVE.len().div_ceil(1024)
                                 )
                             })

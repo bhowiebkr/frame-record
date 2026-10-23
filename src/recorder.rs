@@ -88,9 +88,8 @@ pub fn find_ffmpeg() -> Option<PathBuf> {
             roots.push(parent.to_path_buf());
         }
     }
-    if let Ok(cwd) = std::env::current_dir() {
-        roots.push(cwd);
-    }
+    // The working directory is deliberately not searched: launching from a downloads folder
+    // must not run whichever ffmpeg.exe happens to sit there.
     #[cfg(debug_assertions)]
     roots.push(PathBuf::from(env!("CARGO_MANIFEST_DIR")));
     for root in roots {
@@ -329,6 +328,8 @@ pub struct Recording {
     pub stopping: bool,
     pub close_after: bool,
     stop_requested: Option<Instant>,
+    // Dropped after Drop::drop below, so FFmpeg only gets killed once the graceful stop has had its chance.
+    _job: Option<crate::native::KillOnClose>,
 }
 
 impl Recording {
@@ -358,6 +359,7 @@ impl Recording {
             .stderr(Stdio::piped())
             .spawn()
             .map_err(|error| format!("Could not start FFmpeg: {error}"))?;
+        let job = crate::native::KillOnClose::new(&child);
         let mut stderr = child.stderr.take().expect("piped stderr");
         let log = Arc::new(Mutex::new(Vec::new()));
         let sink = log.clone();
@@ -385,6 +387,7 @@ impl Recording {
             stopping: false,
             close_after: false,
             stop_requested: None,
+            _job: job,
         })
     }
 
@@ -421,11 +424,11 @@ impl Recording {
                     .lock()
                     .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
                     .unwrap_or_default();
-                let _ = fs::write(self.output.with_extension("ffmpeg.log"), &log);
                 if status.success() && fs::metadata(&self.output).is_ok_and(|file| file.len() > 0) {
-                    let _ = fs::remove_file(self.output.with_extension("ffmpeg.log"));
                     Some(Ok(()))
                 } else {
+                    let details = self.output.with_extension("ffmpeg.log");
+                    let _ = fs::write(&details, &log);
                     let tail = log
                         .lines()
                         .rev()
@@ -437,7 +440,7 @@ impl Recording {
                         .join("\n");
                     Some(Err(format!(
                         "FFmpeg could not finish the recording.\n\n{tail}\n\nDetails: {}",
-                        self.output.with_extension("ffmpeg.log").display()
+                        details.display()
                     )))
                 }
             }
@@ -448,9 +451,13 @@ impl Recording {
 
 impl Drop for Recording {
     fn drop(&mut self) {
-        // Normal shutdown is asynchronous via stop()/poll(). This handles an unexpected UI teardown.
-        if self.child.try_wait().ok().flatten().is_none() {
-            let _ = self.stop();
+        // Normal shutdown is asynchronous via stop()/poll(). This handles an unexpected UI teardown:
+        // give FFmpeg a moment to finish the file before the job handle ends it.
+        if self.child.try_wait().ok().flatten().is_none() && self.stop().is_ok() {
+            let deadline = Instant::now() + std::time::Duration::from_secs(5);
+            while Instant::now() < deadline && matches!(self.child.try_wait(), Ok(None)) {
+                thread::sleep(std::time::Duration::from_millis(50));
+            }
         }
     }
 }

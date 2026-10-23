@@ -11,7 +11,7 @@ use std::{
 use windows_sys::Win32::{
     Foundation::*,
     Graphics::{Dwm::*, Gdi::*},
-    System::{Com::CoTaskMemFree, SystemInformation::GetLocalTime},
+    System::{Com::CoTaskMemFree, JobObjects::*, SystemInformation::GetLocalTime},
     UI::{Shell::*, WindowsAndMessaging::*},
 };
 
@@ -271,6 +271,41 @@ pub fn default_name() -> String {
     }
 }
 
+/// Ends the child process when this handle closes, including when Frame Record itself
+/// crashes or is killed, so FFmpeg never keeps recording without a visible frame.
+pub struct KillOnClose(HANDLE);
+
+impl KillOnClose {
+    pub fn new(child: &std::process::Child) -> Option<Self> {
+        use std::os::windows::io::AsRawHandle;
+        unsafe {
+            let job = CreateJobObjectW(null(), null());
+            if job.is_null() {
+                return None;
+            }
+            let job = Self(job);
+            let mut limits: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = zeroed();
+            limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+            (SetInformationJobObject(
+                job.0,
+                JobObjectExtendedLimitInformation,
+                (&limits as *const JOBOBJECT_EXTENDED_LIMIT_INFORMATION).cast(),
+                size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
+            ) != 0
+                && AssignProcessToJobObject(job.0, child.as_raw_handle()) != 0)
+                .then_some(job)
+        }
+    }
+}
+
+impl Drop for KillOnClose {
+    fn drop(&mut self) {
+        unsafe {
+            CloseHandle(self.0);
+        }
+    }
+}
+
 pub fn open_folder(path: &std::path::Path) {
     use std::os::windows::ffi::OsStrExt;
     let verb: Vec<u16> = "open\0".encode_utf16().collect();
@@ -284,5 +319,30 @@ pub fn open_folder(path: &std::path::Path) {
             null(),
             SW_SHOWNORMAL,
         );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::KillOnClose;
+    use std::{
+        process::{Command, Stdio},
+        thread,
+        time::{Duration, Instant},
+    };
+
+    #[test]
+    fn closing_the_job_ends_the_child() {
+        let mut child = Command::new("ping")
+            .args(["-n", "30", "127.0.0.1"])
+            .stdout(Stdio::null())
+            .spawn()
+            .unwrap();
+        drop(KillOnClose::new(&child).expect("job object"));
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while child.try_wait().unwrap().is_none() {
+            assert!(Instant::now() < deadline, "child outlived its job");
+            thread::sleep(Duration::from_millis(20));
+        }
     }
 }

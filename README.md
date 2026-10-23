@@ -30,13 +30,15 @@ Your settings are remembered.
 
 Requires 64-bit Windows 10 or 11. Keep `ffmpeg.exe` beside `frame-record.exe`.
 
+To run it without building, download `frame-record-v<version>-windows-x64.zip` from [Releases](https://github.com/bhowiebkr/frame-record/releases), extract it, and open `frame-record.exe`. FFmpeg is included. The app is not code-signed, so Windows SmartScreen may ask you to confirm the first launch.
+
 To build from source, install Rust with the MSVC toolchain and Visual Studio C++ Build Tools, then run:
 
 ```powershell
 .\scripts\build.ps1 -WithFFmpeg
 ```
 
-This downloads portable FFmpeg and puts the ready-to-run tool in `dist/Frame Record`.
+This downloads portable FFmpeg and puts the ready-to-run tool in `dist/Frame Record`. Add `-Package` to also create the release ZIP in `dist`.
 
 ## Get the source
 
