@@ -150,7 +150,7 @@ impl Smoke {
                         return;
                     }
                     self.snapshot(app, "readme-frame.png");
-                    self.phase = 13;
+                    self.phase = 14;
                     return;
                 }
                 self.snapshot(app, "modern-frame.png");
@@ -166,7 +166,7 @@ impl Smoke {
             }
             4 if elapsed > 0.7 => {
                 if self.preview_only {
-                    self.phase = 13;
+                    self.phase = 14;
                     return;
                 }
                 app.settings = false;
@@ -227,18 +227,25 @@ impl Smoke {
                     );
                     self.next();
                 } else {
-                    self.phase = 13;
+                    self.phase = 14;
                 }
             }
-            11 if elapsed > 3.0 => {
+            11 if elapsed > 2.0 => {
+                let level = app.recording.as_ref().unwrap().mic_level().unwrap();
+                assert!(!level.is_nan(), "FFmpeg reported no microphone level");
+                self.snapshot(app, "recording-meter.png");
+                self.next();
+            }
+            // The screenshot is taken asynchronously; closing sooner would hide the meter.
+            12 if elapsed > 1.0 => {
                 app.close(ctx);
                 self.next();
             }
-            12 if app.recording.is_none() => {
+            13 if app.recording.is_none() => {
                 self.probe(app, "Recording test (2).mp4", "h264", 60, true);
-                self.phase = 13;
+                self.phase = 14;
             }
-            13 => {
+            14 => {
                 for shot in self.shots.drain(..) {
                     shot.join().unwrap();
                 }
@@ -252,7 +259,7 @@ impl Smoke {
                     self.output.display()
                 );
                 ctx.send_viewport_cmd(egui::ViewportCommand::Close);
-                self.phase = 14;
+                self.phase = 15;
             }
             _ => {}
         }

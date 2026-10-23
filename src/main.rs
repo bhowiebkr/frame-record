@@ -23,6 +23,8 @@ const TEXT: Color32 = Color32::from_rgb(204, 204, 204);
 const MUTED: Color32 = Color32::from_rgb(157, 157, 157);
 const ACCENT: Color32 = Color32::from_rgb(0, 120, 212);
 const RED: Color32 = Color32::from_rgb(196, 43, 28);
+const GREEN: Color32 = Color32::from_rgb(46, 160, 67);
+const AMBER: Color32 = Color32::from_rgb(210, 153, 34);
 
 fn application_icon() -> egui::IconData {
     eframe::icon_data::from_png_bytes(include_bytes!("../assets/app-icon.png"))
@@ -226,13 +228,41 @@ impl FrameRecord {
         } else {
             "Mic off"
         };
+        let level = self
+            .recording
+            .as_ref()
+            .filter(|recording| !recording.stopping)
+            .and_then(Recording::mic_level);
         p.text(
-            pos2(rect.right() - 96.0, 16.0),
+            pos2(
+                rect.right() - if level.is_some() { 162.0 } else { 96.0 },
+                16.0,
+            ),
             Align2::RIGHT_CENTER,
             format!("{}  ·  {mic}", self.codec.label()),
             FontId::proportional(11.0),
             MUTED,
         );
+        if let Some(db) = level {
+            // Ten 6 dB segments from -60 dBFS; the last one lights only when the microphone clips.
+            let lit = ((db + 60.0) / 6.0).floor().clamp(0.0, 10.0) as usize;
+            for segment in 0..10 {
+                let color = match segment {
+                    _ if segment >= lit => LINE,
+                    9 => RED,
+                    7 | 8 => AMBER,
+                    _ => GREEN,
+                };
+                p.rect_filled(
+                    Rect::from_min_size(
+                        pos2(rect.right() - 154.0 + segment as f32 * 6.0, 11.0),
+                        vec2(4.0, 10.0),
+                    ),
+                    1,
+                    color,
+                );
+            }
+        }
         let min_rect = Rect::from_min_size(pos2(rect.right() - 80.0, 3.0), vec2(34.0, 26.0));
         let close_rect = Rect::from_min_size(pos2(rect.right() - 42.0, 3.0), vec2(34.0, 26.0));
         if icon_button(ui, min_rect, "Minimize", Icon::Minimize, false).clicked() {
@@ -529,7 +559,12 @@ impl eframe::App for FrameRecord {
             self.saved_at = None;
         }
         if self.recording.is_some() || self.devices_rx.is_some() || self.saved_at.is_some() {
-            ctx.request_repaint_after(Duration::from_millis(150));
+            // The microphone meter gets a new level about every 50 ms.
+            let metering = self
+                .recording
+                .as_ref()
+                .is_some_and(|r| r.mic_level().is_some());
+            ctx.request_repaint_after(Duration::from_millis(if metering { 50 } else { 150 }));
         }
         #[cfg(debug_assertions)]
         if let Some(mut smoke) = self.smoke.take() {

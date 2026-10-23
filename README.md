@@ -22,7 +22,7 @@ The center is fully transparent and lets you use the app underneath. Only the ar
 - **Codec:** H.264 or H.265.
 - **Frame rate:** defaults to 60 FPS.
 - **Compression:** lower for better quality, higher for smaller files.
-- **Microphone:** optional; off by default.
+- **Microphone:** optional; off by default. While recording, a level meter beside **Mic on** in the title bar shows when the microphone hears you.
 
 Your settings are remembered.
 

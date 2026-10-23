@@ -1,13 +1,20 @@
 use std::{
     ffi::OsString,
     fs::{self, File},
-    io::{Read, Write},
+    io::{BufRead, BufReader, Read, Write},
     path::{Path, PathBuf},
     process::{Child, Command, Stdio},
-    sync::{Arc, Mutex},
+    sync::{
+        atomic::{AtomicU32, Ordering},
+        Arc, Mutex,
+    },
     thread,
     time::Instant,
 };
+
+/// Besides syncing the microphone to the video clock, prints the peak level of every captured
+/// buffer to stdout for the level meter.
+const AUDIO_FILTER: &str = r"aresample=async=1:first_pts=0,astats=metadata=1:reset=1:measure_perchannel=none:measure_overall=Peak_level,ametadata=mode=print:key=lavfi.astats.Overall.Peak_level:file=pipe\\:1:direct=1";
 
 #[cfg(windows)]
 use std::os::windows::process::CommandExt;
@@ -252,10 +259,19 @@ pub fn arguments(
     .map(OsString::from)
     .collect();
     if let Some(device) = mic {
+        // 50 ms buffers instead of the 500 ms default keep the level meter responsive.
         args.extend(
-            ["-thread_queue_size", "512", "-f", "dshow", "-i"]
-                .into_iter()
-                .map(OsString::from),
+            [
+                "-thread_queue_size",
+                "512",
+                "-audio_buffer_size",
+                "50",
+                "-f",
+                "dshow",
+                "-i",
+            ]
+            .into_iter()
+            .map(OsString::from),
         );
         args.push(format!("audio={device}").into());
     }
@@ -296,7 +312,7 @@ pub fn arguments(
                 "-b:a",
                 "160k",
                 "-af",
-                "aresample=async=1:first_pts=0",
+                AUDIO_FILTER,
             ]
             .into_iter()
             .map(OsString::from),
@@ -319,10 +335,19 @@ pub fn arguments(
     args
 }
 
+/// Reads one line of the meter filter's output; digital silence arrives as `-inf`.
+fn parse_level(line: &str) -> Option<f32> {
+    line.trim()
+        .strip_prefix("lavfi.astats.Overall.Peak_level=")?
+        .parse()
+        .ok()
+}
+
 pub struct Recording {
     child: Child,
     log: Arc<Mutex<Vec<u8>>>,
-    reader: Option<thread::JoinHandle<()>>,
+    readers: Vec<thread::JoinHandle<()>>,
+    level: Option<Arc<AtomicU32>>,
     pub output: PathBuf,
     pub started: Instant,
     pub stopping: bool,
@@ -355,15 +380,36 @@ impl Recording {
         let mut child = command(ffmpeg)
             .args(arguments(region, codec, encoding, mic, &output))
             .stdin(Stdio::piped())
-            .stdout(Stdio::null())
+            .stdout(if mic.is_some() {
+                Stdio::piped()
+            } else {
+                Stdio::null()
+            })
             .stderr(Stdio::piped())
             .spawn()
             .map_err(|error| format!("Could not start FFmpeg: {error}"))?;
         let job = crate::native::KillOnClose::new(&child);
+        let mut readers = Vec::new();
+        let level = child.stdout.take().map(|stdout| {
+            // NaN until the first measurement arrives.
+            let level = Arc::new(AtomicU32::new(f32::NAN.to_bits()));
+            let sink = level.clone();
+            readers.push(thread::spawn(move || {
+                // Peaks fall back gradually so speech shows as a steady bar instead of flickering.
+                let mut shown = f32::NAN;
+                for line in BufReader::new(stdout).lines().map_while(Result::ok) {
+                    if let Some(peak) = parse_level(&line) {
+                        shown = peak.max(shown - 3.0);
+                        sink.store(shown.to_bits(), Ordering::Relaxed);
+                    }
+                }
+            }));
+            level
+        });
         let mut stderr = child.stderr.take().expect("piped stderr");
         let log = Arc::new(Mutex::new(Vec::new()));
         let sink = log.clone();
-        let reader = thread::spawn(move || {
+        readers.push(thread::spawn(move || {
             let mut buffer = [0; 4096];
             while let Ok(count) = stderr.read(&mut buffer) {
                 if count == 0 {
@@ -377,11 +423,12 @@ impl Recording {
                     }
                 }
             }
-        });
+        }));
         Ok(Self {
             child,
             log,
-            reader: Some(reader),
+            readers,
+            level,
             output,
             started: Instant::now(),
             stopping: false,
@@ -404,6 +451,14 @@ impl Recording {
         Ok(())
     }
 
+    /// Latest microphone peak in dBFS, or `None` when recording without a microphone.
+    /// It is NaN until FFmpeg measures the first buffer.
+    pub fn mic_level(&self) -> Option<f32> {
+        self.level
+            .as_ref()
+            .map(|level| f32::from_bits(level.load(Ordering::Relaxed)))
+    }
+
     pub fn poll(&mut self) -> Option<Result<(), String>> {
         if self
             .stop_requested
@@ -416,7 +471,7 @@ impl Recording {
         match self.child.try_wait() {
             Ok(None) => None,
             Ok(Some(status)) => {
-                if let Some(reader) = self.reader.take() {
+                for reader in self.readers.drain(..) {
                     let _ = reader.join();
                 }
                 let log = self
@@ -672,6 +727,19 @@ Error opening input file dummy."#,
     }
 
     #[test]
+    fn reads_meter_levels_and_skips_frame_headers() {
+        assert_eq!(
+            parse_level("lavfi.astats.Overall.Peak_level=-12.5\r"),
+            Some(-12.5)
+        );
+        assert_eq!(
+            parse_level("lavfi.astats.Overall.Peak_level=-inf"),
+            Some(f32::NEG_INFINITY)
+        );
+        assert_eq!(parse_level("frame:1    pts:2205    pts_time:0.05"), None);
+    }
+
+    #[test]
     fn builds_both_codecs_and_separate_audio_input_without_shell_quoting() {
         let region = Region {
             x: -1920,
@@ -693,6 +761,13 @@ Error opening input file dummy."#,
                 .collect();
             assert!(args.contains(&"-1920".into()));
             assert!(args.contains(&"audio=Microphone (USB)".into()));
+            assert!(args.contains(&AUDIO_FILTER.into()));
+            assert!(
+                args.iter()
+                    .position(|arg| arg == "-audio_buffer_size")
+                    .unwrap()
+                    < args.iter().position(|arg| arg == "dshow").unwrap()
+            );
             assert!(args.contains(
                 &if codec == Codec::H264 {
                     "libx264"
